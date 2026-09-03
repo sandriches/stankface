@@ -1,0 +1,4 @@
+build/
+*.wav
+!docs/stankface-demo.wav
+.DS_Store

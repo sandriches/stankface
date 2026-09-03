@@ -1,0 +1,2 @@
+add_executable(render_demo render_demo.cpp)
+target_link_libraries(render_demo PRIVATE stankface_engine)
