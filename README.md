@@ -42,8 +42,11 @@ plug-in folders.
 - A TPT state variable lowpass with a drive stage in front of it and a
   saturating resonant integrator. Most of what reads as "UK bass" comes from
   those two rather than from the wavetable.
-- One LFO routable to position and cutoff, an analogue-style ADSR on amplitude,
-  and a monophonic voice with last-note priority.
+- One LFO routable to position and cutoff, and an analogue-style ADSR on
+  amplitude.
+- Sixteen voices, or mono with last-note priority and legato retuning. Mono is
+  a separate mode rather than a pool of one, and it's the default. A full
+  sixteen-voice chord with everything modulating costs about 2% of a core.
 
 ## Engine API
 
@@ -85,6 +88,7 @@ section per wavetable, LFO on position and cutoff.
 The engine is complete against the MVP and tested. The JUCE wrapper builds but
 has not been opened in a DAW yet.
 
-Next up: polyphony, a dedicated sub-oscillator layer, unison/detune, a second
-wavetable oscillator, and a modulation matrix to replace the hardcoded LFO
-routing.
+Next up: a dedicated sub-oscillator layer, unison/detune, a second wavetable
+oscillator, and a modulation matrix to replace the hardcoded LFO routing. The
+LFO is global; making it per-voice is a routing choice that belongs with the
+matrix rather than a hardcoded one now.

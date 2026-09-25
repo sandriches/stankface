@@ -5,6 +5,7 @@ add_library(stankface_engine STATIC
     src/Envelope.cpp
     src/Lfo.cpp
     src/Params.cpp
+    src/Voice.cpp
     src/WavetableEngine.cpp
 )
 

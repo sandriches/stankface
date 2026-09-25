@@ -25,6 +25,9 @@ const ParamDescriptor kDescriptors[kNumParams] = {
     { "lfoToPos",   "LFO > Position", -1.0f,    1.0f,     0.0f,    1.0f,  "" },
     { "lfoToCutoff","LFO > Cutoff",   -1.0f,    1.0f,     0.0f,    1.0f,  "" },
     { "outputGain", "Output",         0.0f,     1.0f,     0.8f,    1.0f,  "" },
+    // Defaults to mono: this is a bass instrument, and it keeps every patch
+    // written before polyphony existed sounding the way it did.
+    { "voiceMode",  "Voice Mode",     0.0f, static_cast<float>(static_cast<int>(VoiceMode::NumModes) - 1), 0.0f, 1.0f, "" },
 };
 
 } // namespace
