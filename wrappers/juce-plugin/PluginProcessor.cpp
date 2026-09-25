@@ -21,6 +21,9 @@ juce::StringArray choicesFor(ParamId id)
     if (id == ParamId::LfoShape)
         return { "Sine", "Triangle", "Saw", "Square" };
 
+    if (id == ParamId::VoiceMode)
+        return { "Mono", "Poly" };
+
     return {};
 }
 

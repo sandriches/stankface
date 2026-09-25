@@ -2,17 +2,7 @@
 
 #include <cmath>
 
-#include "stankface/WavetableData.h"
-
 namespace stankface {
-namespace {
-
-float midiNoteToHz(int midiNote)
-{
-    return 440.0f * std::pow(2.0f, static_cast<float>(midiNote - 69) / 12.0f);
-}
-
-} // namespace
 
 WavetableEngine::WavetableEngine()
 {
@@ -30,9 +20,9 @@ void WavetableEngine::setSampleRate(double sampleRate)
 {
     sampleRate_ = sampleRate > 0.0 ? sampleRate : 44100.0;
 
-    osc_.setSampleRate(sampleRate_);
-    filter_.setSampleRate(sampleRate_);
-    ampEnv_.setSampleRate(sampleRate_);
+    for (Voice& voice : voices_)
+        voice.setSampleRate(sampleRate_);
+
     lfo_.setSampleRate(sampleRate_);
 
     reset();
@@ -40,24 +30,48 @@ void WavetableEngine::setSampleRate(double sampleRate)
 
 void WavetableEngine::reset()
 {
-    osc_.reset();
-    filter_.reset();
-    ampEnv_.reset();
+    for (Voice& voice : voices_)
+        voice.reset();
+
     lfo_.reset();
 
     numHeldNotes_ = 0;
     currentNote_ = -1;
+    nextStartOrder_ = 1;
 }
 
-void WavetableEngine::startNote(int midiNote, float velocity)
+bool WavetableEngine::isActive() const
 {
-    currentNote_ = midiNote;
-    velocity_ = velocity < 0.0f ? 0.0f : (velocity > 1.0f ? 1.0f : velocity);
-    noteFrequency_ = midiNoteToHz(midiNote);
-    osc_.setFrequency(noteFrequency_);
+    for (const Voice& voice : voices_)
+        if (voice.isActive())
+            return true;
+
+    return false;
+}
+
+VoiceMode WavetableEngine::voiceMode() const
+{
+    const float value = params_[static_cast<int>(ParamId::VoiceMode)];
+    return static_cast<VoiceMode>(static_cast<int>(value + 0.5f));
 }
 
 void WavetableEngine::noteOn(int midiNote, float velocity)
+{
+    if (voiceMode() == VoiceMode::Mono)
+        monoNoteOn(midiNote, velocity);
+    else
+        polyNoteOn(midiNote, velocity);
+}
+
+void WavetableEngine::noteOff(int midiNote)
+{
+    if (voiceMode() == VoiceMode::Mono)
+        monoNoteOff(midiNote);
+    else
+        polyNoteOff(midiNote);
+}
+
+void WavetableEngine::monoNoteOn(int midiNote, float velocity)
 {
     // A repeated note-on for a note already down should not stack up.
     removeHeldNote(midiNote);
@@ -65,20 +79,111 @@ void WavetableEngine::noteOn(int midiNote, float velocity)
     if (numHeldNotes_ < kMaxHeldNotes)
         heldNotes_[numHeldNotes_++] = midiNote;
 
-    const bool wasSilent = !ampEnv_.isActive();
-
-    startNote(midiNote, velocity);
-
     // Restarting the oscillator and LFO mid-note would click and would throw
     // away the phase relationship a held wobble has built up, so only do it
     // when the voice is actually starting from silence.
+    Voice& voice = voices_[0];
+    const bool wasSilent = !voice.isActive();
+
+    currentNote_ = midiNote;
+    voice.noteOn(midiNote, velocity, wasSilent);
+    voiceStartOrder_[0] = nextStartOrder_++;
+
     if (wasSilent)
-    {
-        osc_.resetPhase();
         lfo_.retrigger();
+}
+
+void WavetableEngine::monoNoteOff(int midiNote)
+{
+    removeHeldNote(midiNote);
+
+    if (numHeldNotes_ > 0)
+    {
+        // Something is still held: fall back to it rather than releasing.
+        if (midiNote == currentNote_)
+        {
+            currentNote_ = heldNotes_[numHeldNotes_ - 1];
+            voices_[0].retune(currentNote_);
+        }
+        return;
     }
 
-    ampEnv_.noteOn();
+    if (midiNote == currentNote_ || currentNote_ < 0)
+    {
+        voices_[0].noteOff();
+        currentNote_ = -1;
+    }
+}
+
+void WavetableEngine::polyNoteOn(int midiNote, float velocity)
+{
+    // Retrigger the LFO only when the whole instrument was silent, so that
+    // adding a note to a chord does not jolt a wobble already in progress.
+    const bool poolWasSilent = !isActive();
+
+    const int index = allocateVoice(midiNote);
+    Voice& voice = voices_[index];
+
+    // A voice taken over while it is still sounding keeps its oscillator phase
+    // and filter state, which is most of what stops a steal from clicking.
+    const bool startsFromSilence = !voice.isActive();
+
+    voice.noteOn(midiNote, velocity, startsFromSilence);
+    voiceStartOrder_[index] = nextStartOrder_++;
+
+    if (poolWasSilent)
+        lfo_.retrigger();
+}
+
+void WavetableEngine::polyNoteOff(int midiNote)
+{
+    for (int i = 0; i < kMaxVoices; ++i)
+    {
+        Voice& voice = voices_[i];
+        if (voice.isActive() && !voice.isReleasing() && voice.note() == midiNote)
+            voice.noteOff();
+    }
+}
+
+int WavetableEngine::allocateVoice(int midiNote) const
+{
+    // Re-use the voice already on this note, so that a repeated note-on
+    // retriggers it rather than leaving two copies of the same pitch running
+    // and beating against each other.
+    for (int i = 0; i < kMaxVoices; ++i)
+        if (voices_[i].isActive() && voices_[i].note() == midiNote)
+            return i;
+
+    for (int i = 0; i < kMaxVoices; ++i)
+        if (!voices_[i].isActive())
+            return i;
+
+    // Everything is busy, so something has to go. Prefer a voice already in
+    // its release: it is on its way out and quieter than the rest, so cutting
+    // it short is the least audible choice available.
+    int oldestReleasing = -1;
+    for (int i = 0; i < kMaxVoices; ++i)
+    {
+        if (!voices_[i].isReleasing())
+            continue;
+
+        if (oldestReleasing < 0
+            || voiceStartOrder_[i] < voiceStartOrder_[oldestReleasing])
+        {
+            oldestReleasing = i;
+        }
+    }
+
+    if (oldestReleasing >= 0)
+        return oldestReleasing;
+
+    // Everything is still held. Take the one that has been sounding longest.
+    int oldest = 0;
+    for (int i = 1; i < kMaxVoices; ++i)
+        if (voiceStartOrder_[i] < voiceStartOrder_[oldest])
+            oldest = i;
+
+    return oldest;
 }
 
 void WavetableEngine::removeHeldNote(int midiNote)
@@ -92,55 +197,43 @@ void WavetableEngine::removeHeldNote(int midiNote)
     numHeldNotes_ = write;
 }
 
-void WavetableEngine::noteOff(int midiNote)
-{
-    removeHeldNote(midiNote);
-
-    if (numHeldNotes_ > 0)
-    {
-        // Something is still held: fall back to it rather than releasing.
-        if (midiNote == currentNote_)
-            startNote(heldNotes_[numHeldNotes_ - 1], velocity_);
-        return;
-    }
-
-    if (midiNote == currentNote_ || currentNote_ < 0)
-    {
-        ampEnv_.noteOff();
-        currentNote_ = -1;
-    }
-}
-
 void WavetableEngine::applyParam(ParamId id, float value)
 {
     switch (id)
     {
         case ParamId::WavetableSelect:
-            osc_.setTable(static_cast<int>(value + 0.5f));
+            for (Voice& voice : voices_)
+                voice.setTable(static_cast<int>(value + 0.5f));
             break;
 
         case ParamId::FilterResonance:
-            filter_.setResonance(value);
+            for (Voice& voice : voices_)
+                voice.setResonance(value);
             break;
 
         case ParamId::Drive:
-            filter_.setDrive(value);
+            for (Voice& voice : voices_)
+                voice.setDrive(value);
             break;
 
         case ParamId::AmpAttack:
-            ampEnv_.setAttack(value);
+            for (Voice& voice : voices_)
+                voice.setAmpAttack(value);
             break;
 
         case ParamId::AmpDecay:
-            ampEnv_.setDecay(value);
+            for (Voice& voice : voices_)
+                voice.setAmpDecay(value);
             break;
 
         case ParamId::AmpSustain:
-            ampEnv_.setSustain(value);
+            for (Voice& voice : voices_)
+                voice.setAmpSustain(value);
             break;
 
         case ParamId::AmpRelease:
-            ampEnv_.setRelease(value);
+            for (Voice& voice : voices_)
+                voice.setAmpRelease(value);
             break;
 
         case ParamId::LfoRate:
@@ -158,6 +251,8 @@ void WavetableEngine::applyParam(ParamId id, float value)
         case ParamId::LfoToPosition:
         case ParamId::LfoToCutoff:
         case ParamId::OutputGain:
+        // Handled by setParam, which can see whether it actually changed.
+        case ParamId::VoiceMode:
         case ParamId::NumParams:
             break;
     }
@@ -173,8 +268,23 @@ void WavetableEngine::setParam(ParamId id, float value)
     const float clamped = value < d.minValue ? d.minValue
                         : (value > d.maxValue ? d.maxValue : value);
 
+    const float previous = params_[index];
     params_[index] = clamped;
     applyParam(id, clamped);
+
+    // Wrappers push every parameter every block, so a mode switch has to be
+    // driven by an actual change. Acting on each call would release held notes
+    // continuously and the instrument would never sound.
+    if (id == ParamId::VoiceMode && clamped != previous)
+    {
+        // Let whatever is sounding release rather than cutting it, and drop
+        // the mono note stack so it cannot resurrect a note in the new mode.
+        for (Voice& voice : voices_)
+            voice.noteOff();
+
+        numHeldNotes_ = 0;
+        currentNote_ = -1;
+    }
 }
 
 float WavetableEngine::getParam(ParamId id) const
@@ -196,23 +306,19 @@ void WavetableEngine::renderBlock(float* output, int numSamples)
 
     const bool modulatesCutoff = lfoToCutoff != 0.0f;
     if (!modulatesCutoff)
-        filter_.setCutoff(baseCutoff);
+    {
+        for (Voice& voice : voices_)
+            voice.setCutoff(baseCutoff);
+    }
 
-    // Oscillator into filter into amplifier, in that order. Putting the
-    // envelope after the filter rather than before it matters here because the
-    // filter saturates: driving it with an already-enveloped signal would mean
-    // quiet notes hit the drive stage softly and get pushed back up by its
-    // makeup gain, which flattens out velocity and makes note tails swell.
     for (int i = 0; i < numSamples; ++i)
     {
-        if (!ampEnv_.isActive())
+        // The LFO is held still while nothing is sounding, so that it always
+        // starts a phrase from the top of its cycle rather than from wherever
+        // it happened to drift to during the silence.
+        if (!isActive())
         {
             output[i] = 0.0f;
-            // Clear the ringing left behind, so the next note starts from
-            // silence rather than from whatever the last one left in the
-            // integrators. Safe to do here: the amplifier is already closed,
-            // so nothing about this is audible.
-            filter_.reset();
             continue;
         }
 
@@ -220,20 +326,30 @@ void WavetableEngine::renderBlock(float* output, int numSamples)
 
         float position = basePosition + lfo * lfoToPos;
         position = position < 0.0f ? 0.0f : (position > 1.0f ? 1.0f : position);
-        osc_.setPosition(position);
 
-        if (modulatesCutoff)
+        // Exponential, so a given LFO depth moves the cutoff by the same
+        // musical interval wherever the knob is set.
+        const float cutoff = modulatesCutoff
+            ? baseCutoff * std::exp2(lfo * lfoToCutoff * kLfoCutoffOctaves)
+            : baseCutoff;
+
+        // Voices are summed straight, with no division by how many are
+        // sounding. Scaling by the active count would duck the whole
+        // instrument every time a note was added or released, and that
+        // pumping is more obvious than the headroom it would buy back.
+        float mix = 0.0f;
+        for (Voice& voice : voices_)
         {
-            // Exponential, so a given LFO depth moves the cutoff by the same
-            // musical interval wherever the knob is set.
-            const float cutoff = baseCutoff
-                * std::exp2(lfo * lfoToCutoff * kLfoCutoffOctaves);
-            filter_.setCutoff(cutoff);
+            if (!voice.isActive())
+                continue;
+
+            if (modulatesCutoff)
+                voice.setCutoff(cutoff);
+
+            mix += voice.nextSample(position);
         }
 
-        const float voice = filter_.process(osc_.nextSample());
-
-        output[i] = voice * ampEnv_.nextSample() * velocity_ * gain;
+        output[i] = mix * gain;
     }
 }
 

@@ -8,6 +8,22 @@ namespace stankface {
     A host wrapper is the right place to deal with 0..1 automation ranges, so
     the descriptor table below carries the range and skew it needs to convert.
 */
+/** How incoming notes are assigned to voices. */
+enum class VoiceMode
+{
+    /** One voice, last-note priority. Playing over a held note steals the
+        voice and retunes it without retriggering the envelope, and releasing
+        that note hands the voice back to whatever is still down. Not the same
+        thing as a pool of size one: the legato behaviour is the point, and it
+        is most of what a bass part wants. */
+    Mono = 0,
+
+    /** A pool of voices with stealing. */
+    Poly,
+
+    NumModes
+};
+
 enum class ParamId
 {
     WavetableSelect = 0, ///< Which wavetable set, as an index.
@@ -24,6 +40,7 @@ enum class ParamId
     LfoToPosition,       ///< -1..1 depth onto WavetablePosition.
     LfoToCutoff,         ///< -1..1 depth onto FilterCutoff, in octaves at full scale.
     OutputGain,          ///< Linear.
+    VoiceMode,           ///< VoiceMode, as a float so setParam stays uniform.
     NumParams
 };
 

@@ -37,11 +37,55 @@ std::vector<float> render(WavetableEngine& engine, int numSamples)
     return block;
 }
 
-WavetableEngine makeEngine()
+WavetableEngine makeEngine(VoiceMode mode = VoiceMode::Mono)
 {
     WavetableEngine engine;
     engine.setSampleRate(kSampleRate);
+    engine.setParam(ParamId::VoiceMode, static_cast<float>(static_cast<int>(mode)));
     return engine;
+}
+
+/** An engine set up to hold a steady tone, so that a spectrum taken from it
+    reflects the notes sounding rather than an envelope in motion. */
+WavetableEngine makeSustainingEngine(VoiceMode mode)
+{
+    WavetableEngine engine = makeEngine(mode);
+    engine.setParam(ParamId::AmpAttack, 0.0f);
+    engine.setParam(ParamId::AmpDecay, 0.0f);
+    engine.setParam(ParamId::AmpSustain, 1.0f);
+    engine.setParam(ParamId::FilterCutoff, 20000.0f);
+    engine.setParam(ParamId::FilterResonance, 0.0f);
+    engine.setParam(ParamId::Drive, 0.0f);
+    engine.setParam(ParamId::WavetablePosition, 0.0f);
+    return engine;
+}
+
+double midiNoteToHz(int midiNote)
+{
+    return 440.0 * std::pow(2.0, (midiNote - 69) / 12.0);
+}
+
+/** Energy in a few bins either side of a note's fundamental.
+
+    A band rather than a single bin because a note's frequency does not land on
+    a bin centre, and without a window the partial spreads into its neighbours.
+*/
+double energyAtNote(const std::vector<float>& block, int midiNote)
+{
+    const std::vector<double> spectrum = test::magnitudeSpectrum(block);
+    const double bin = midiNoteToHz(midiNote)
+                     * static_cast<double>(block.size()) / kSampleRate;
+
+    const int lowest = std::max(1, static_cast<int>(bin) - 2);
+    const int highest = std::min(static_cast<int>(spectrum.size()) - 1,
+                                 static_cast<int>(bin) + 3);
+
+    double energy = 0.0;
+    for (int b = lowest; b <= highest; ++b)
+        energy += spectrum[static_cast<std::size_t>(b)]
+                * spectrum[static_cast<std::size_t>(b)];
+
+    return energy;
 }
 
 } // namespace
@@ -294,4 +338,201 @@ TEST(engineBlockSizeDoesNotChangeOutput)
     CHECK(manyBlocks.size() == oneBlock.size());
     for (std::size_t i = 0; i < oneBlock.size(); ++i)
         CHECK_NEAR(manyBlocks[i], oneBlock[i], 1.0e-6);
+}
+
+
+// ---------------------------------------------------------------------------
+// Polyphony
+// ---------------------------------------------------------------------------
+
+TEST(engineDefaultsToMono)
+{
+    // This is a bass instrument, and every patch written before the pool
+    // existed assumed one voice. Defaulting to poly would change how they all
+    // sound on load.
+    WavetableEngine engine;
+    CHECK(static_cast<int>(engine.getParam(ParamId::VoiceMode))
+          == static_cast<int>(VoiceMode::Mono));
+}
+
+TEST(monoPlaysOnlyTheLatestNote)
+{
+    WavetableEngine engine = makeSustainingEngine(VoiceMode::Mono);
+
+    engine.noteOn(36, 1.0f);
+    engine.noteOn(46, 1.0f);
+    render(engine, 2048); // let the retune settle
+
+    const std::vector<float> block = render(engine, 8192);
+
+    const double firstNote = energyAtNote(block, 36);
+    const double secondNote = energyAtNote(block, 46);
+
+    CHECK_MESSAGE(secondNote > firstNote * 100.0,
+                  "mono should be sounding only the newer note");
+}
+
+TEST(polyPlaysBothNotesAtOnce)
+{
+    WavetableEngine engine = makeSustainingEngine(VoiceMode::Poly);
+
+    engine.noteOn(36, 1.0f);
+    engine.noteOn(46, 1.0f);
+    render(engine, 2048);
+
+    const std::vector<float> block = render(engine, 8192);
+
+    const double firstNote = energyAtNote(block, 36);
+    const double secondNote = energyAtNote(block, 46);
+
+    // Neither should be more than a few dB down on the other: both notes are
+    // held, at the same velocity, on the same patch.
+    CHECK_MESSAGE(firstNote > secondNote * 0.25,
+                  "first note is missing or much quieter than the second");
+    CHECK_MESSAGE(secondNote > firstNote * 0.25,
+                  "second note is missing or much quieter than the first");
+}
+
+TEST(polyNoteOffReleasesOnlyThatNote)
+{
+    WavetableEngine engine = makeSustainingEngine(VoiceMode::Poly);
+    engine.setParam(ParamId::AmpRelease, 0.01f);
+
+    engine.noteOn(36, 1.0f);
+    engine.noteOn(46, 1.0f);
+    render(engine, 2048);
+
+    engine.noteOff(36);
+    render(engine, static_cast<int>(0.1 * kSampleRate)); // let it finish releasing
+
+    const std::vector<float> block = render(engine, 8192);
+
+    CHECK(engine.isActive());
+    CHECK_MESSAGE(energyAtNote(block, 46) > energyAtNote(block, 36) * 100.0,
+                  "releasing one note disturbed the one still held");
+
+    engine.noteOff(46);
+    render(engine, static_cast<int>(0.2 * kSampleRate));
+    CHECK(!engine.isActive());
+}
+
+TEST(polyRepeatedNoteReusesItsVoice)
+{
+    // Two note-ons for the same pitch with no note-off between them should
+    // retrigger one voice, not leave two copies running and beating.
+    WavetableEngine engine = makeSustainingEngine(VoiceMode::Poly);
+
+    engine.noteOn(36, 1.0f);
+    render(engine, 2048);
+    const double single = rms(render(engine, 4096));
+
+    engine.noteOn(36, 1.0f);
+    render(engine, 2048);
+    const double repeated = rms(render(engine, 4096));
+
+    CHECK_MESSAGE(repeated < single * 1.5,
+                  "repeating a note stacked a second voice on the same pitch");
+}
+
+TEST(polyStealsWhenThePoolIsFull)
+{
+    // More notes held at once than there are voices. The newest note still has
+    // to sound, and nothing may blow up on the way there.
+    WavetableEngine engine = makeSustainingEngine(VoiceMode::Poly);
+
+    for (int note = 30; note < 60; ++note)
+    {
+        engine.noteOn(note, 1.0f);
+        const std::vector<float> block = render(engine, 256);
+
+        for (float sample : block)
+        {
+            CHECK(std::isfinite(sample));
+            if (!std::isfinite(sample))
+                return;
+        }
+    }
+
+    render(engine, 2048);
+    const std::vector<float> block = render(engine, 8192);
+
+    CHECK(engine.isActive());
+    CHECK_MESSAGE(energyAtNote(block, 59) > 0.0,
+                  "the most recent note did not get a voice");
+    CHECK(std::isfinite(peak(block)));
+}
+
+TEST(polyChordStaysBounded)
+{
+    // A chord through full drive and resonance. Voices are summed without
+    // scaling, so this is a headroom check rather than a claim of unity gain.
+    WavetableEngine engine = makeEngine(VoiceMode::Poly);
+    engine.setParam(ParamId::FilterResonance, 1.0f);
+    engine.setParam(ParamId::Drive, 1.0f);
+    engine.setParam(ParamId::AmpSustain, 1.0f);
+    engine.setParam(ParamId::LfoRate, 12.0f);
+    engine.setParam(ParamId::LfoToPosition, 1.0f);
+    engine.setParam(ParamId::LfoToCutoff, 1.0f);
+    engine.setParam(ParamId::OutputGain, 1.0f);
+
+    for (int note : { 36, 43, 48, 51, 55, 60 })
+        engine.noteOn(note, 1.0f);
+
+    const std::vector<float> block = render(engine, 16384);
+
+    for (float sample : block)
+    {
+        CHECK(std::isfinite(sample));
+        if (!std::isfinite(sample))
+            return;
+    }
+
+    CHECK_MESSAGE(peak(block) < static_cast<double>(6 * 4),
+                  "chord peaked at " + std::to_string(peak(block)));
+}
+
+TEST(switchingVoiceModeReleasesHeldNotes)
+{
+    // Stale voices must not survive the switch, or notes held in one mode
+    // would hang once the other took over their note handling.
+    WavetableEngine engine = makeEngine(VoiceMode::Poly);
+    engine.setParam(ParamId::AmpSustain, 1.0f);
+    engine.setParam(ParamId::AmpRelease, 0.01f);
+
+    engine.noteOn(36, 1.0f);
+    engine.noteOn(48, 1.0f);
+    render(engine, 2048);
+    CHECK(engine.isActive());
+
+    engine.setParam(ParamId::VoiceMode,
+                    static_cast<float>(static_cast<int>(VoiceMode::Mono)));
+    render(engine, static_cast<int>(0.2 * kSampleRate));
+
+    CHECK_MESSAGE(!engine.isActive(), "a note survived the voice mode switch");
+}
+
+TEST(repeatedParameterPushesDoNotDisturbHeldNotes)
+{
+    // Wrappers push every parameter every block. A mode switch acts on change
+    // only, so pushing the same value again must be inert.
+    WavetableEngine engine = makeSustainingEngine(VoiceMode::Poly);
+    engine.noteOn(36, 1.0f);
+    render(engine, 2048);
+
+    const double before = rms(render(engine, 4096));
+
+    for (int i = 0; i < 16; ++i)
+    {
+        for (int p = 0; p < kNumParams; ++p)
+        {
+            const ParamId id = static_cast<ParamId>(p);
+            engine.setParam(id, engine.getParam(id));
+        }
+        render(engine, 256);
+    }
+
+    const double after = rms(render(engine, 4096));
+
+    CHECK(engine.isActive());
+    CHECK_NEAR(after, before, before * 0.05);
 }
