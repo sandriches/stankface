@@ -44,6 +44,23 @@ public:
     /** True while any voice is sounding. */
     bool isActive() const;
 
+    /** Where the modulation has actually landed, for a display to draw.
+
+        The parameter values on their own cannot tell you this: the LFO moves
+        position and cutoff per sample, so a UI drawing from the raw parameters
+        would show a wave the synth is not playing.
+
+        Written and read on the audio thread. Getting it to a UI thread safely
+        is the wrapper's job, not the engine's -- thread plumbing for a
+        particular host does not belong in the DSP. */
+    struct DisplayState
+    {
+        float wavetablePosition = 0.0f; ///< After the LFO, 0..1.
+        float filterCutoff = 1000.0f;   ///< After the LFO, in Hz.
+    };
+
+    DisplayState displayState() const { return { displayPosition_, displayCutoff_ }; }
+
 private:
     static constexpr int kMaxVoices = 16;
     static constexpr int kMaxHeldNotes = 16;
@@ -73,6 +90,11 @@ private:
     // Mono bookkeeping. Unused in poly, where the pool tracks its own notes.
     int currentNote_ = -1;
 
+    // The last values the LFO produced, kept only so that a display can show
+    // what is actually happening. Nothing on the audio path reads them back.
+    float displayPosition_ = 0.0f;
+    float displayCutoff_ = 1000.0f;
+
     VoiceMode voiceMode() const;
 
     void applyParam(ParamId id, float value);
@@ -86,6 +108,8 @@ private:
     /** Picks the voice a new note should land on. Never fails: if everything
         is busy it returns one to steal. */
     int allocateVoice(int midiNote) const;
+
+    void publishDisplayState();
 };
 
 } // namespace stankface

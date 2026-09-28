@@ -27,6 +27,8 @@ juce_add_plugin(Stankface
 target_sources(Stankface PRIVATE
     PluginProcessor.cpp
     ${CMAKE_SOURCE_DIR}/ui/PluginEditor.cpp
+    ${CMAKE_SOURCE_DIR}/ui/WavetableDisplay.cpp
+    ${CMAKE_SOURCE_DIR}/ui/StankfaceLookAndFeel.cpp
 )
 
 # The editor includes PluginProcessor.h and vice versa; both directories are on

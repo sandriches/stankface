@@ -236,6 +236,26 @@ void WavetableEngine::applyParam(ParamId id, float value)
                 voice.setAmpRelease(value);
             break;
 
+        case ParamId::EnvAttack:
+            for (Voice& voice : voices_)
+                voice.setEnvAttack(value);
+            break;
+
+        case ParamId::EnvDecay:
+            for (Voice& voice : voices_)
+                voice.setEnvDecay(value);
+            break;
+
+        case ParamId::EnvSustain:
+            for (Voice& voice : voices_)
+                voice.setEnvSustain(value);
+            break;
+
+        case ParamId::EnvRelease:
+            for (Voice& voice : voices_)
+                voice.setEnvRelease(value);
+            break;
+
         case ParamId::LfoRate:
             lfo_.setRate(value);
             break;
@@ -250,6 +270,8 @@ void WavetableEngine::applyParam(ParamId id, float value)
         case ParamId::FilterCutoff:
         case ParamId::LfoToPosition:
         case ParamId::LfoToCutoff:
+        case ParamId::EnvToPosition:
+        case ParamId::EnvToCutoff:
         case ParamId::OutputGain:
         // Handled by setParam, which can see whether it actually changed.
         case ParamId::VoiceMode:
@@ -298,18 +320,21 @@ float WavetableEngine::getParam(ParamId id) const
 
 void WavetableEngine::renderBlock(float* output, int numSamples)
 {
-    const float basePosition = params_[static_cast<int>(ParamId::WavetablePosition)];
-    const float baseCutoff   = params_[static_cast<int>(ParamId::FilterCutoff)];
-    const float lfoToPos     = params_[static_cast<int>(ParamId::LfoToPosition)];
-    const float lfoToCutoff  = params_[static_cast<int>(ParamId::LfoToCutoff)];
-    const float gain         = params_[static_cast<int>(ParamId::OutputGain)];
+    Modulation mod;
+    mod.basePosition   = params_[static_cast<int>(ParamId::WavetablePosition)];
+    mod.baseCutoff     = params_[static_cast<int>(ParamId::FilterCutoff)];
+    mod.lfoToPosition  = params_[static_cast<int>(ParamId::LfoToPosition)];
+    mod.lfoToCutoff    = params_[static_cast<int>(ParamId::LfoToCutoff)];
+    mod.envToPosition  = params_[static_cast<int>(ParamId::EnvToPosition)];
+    mod.envToCutoff    = params_[static_cast<int>(ParamId::EnvToCutoff)];
 
-    const bool modulatesCutoff = lfoToCutoff != 0.0f;
-    if (!modulatesCutoff)
-    {
-        for (Voice& voice : voices_)
-            voice.setCutoff(baseCutoff);
-    }
+    const float gain = params_[static_cast<int>(ParamId::OutputGain)];
+
+    // What a display should show while nothing is sounding: no note means no
+    // envelope and a held LFO, so the unmodulated settings are the honest
+    // answer. Overwritten below if any voice is actually running.
+    displayPosition_ = mod.basePosition;
+    displayCutoff_ = mod.baseCutoff;
 
     for (int i = 0; i < numSamples; ++i)
     {
@@ -322,35 +347,45 @@ void WavetableEngine::renderBlock(float* output, int numSamples)
             continue;
         }
 
-        const float lfo = lfo_.nextSample();
-
-        float position = basePosition + lfo * lfoToPos;
-        position = position < 0.0f ? 0.0f : (position > 1.0f ? 1.0f : position);
-
-        // Exponential, so a given LFO depth moves the cutoff by the same
-        // musical interval wherever the knob is set.
-        const float cutoff = modulatesCutoff
-            ? baseCutoff * std::exp2(lfo * lfoToCutoff * kLfoCutoffOctaves)
-            : baseCutoff;
+        mod.lfo = lfo_.nextSample();
 
         // Voices are summed straight, with no division by how many are
-        // sounding. Scaling by the active count would duck the whole
-        // instrument every time a note was added or released, and that
-        // pumping is more obvious than the headroom it would buy back.
+        // sounding. Scaling by the active count would duck the whole instrument
+        // every time a note was added or released, and that pumping is more
+        // obvious than the headroom it would buy back.
         float mix = 0.0f;
         for (Voice& voice : voices_)
         {
-            if (!voice.isActive())
-                continue;
-
-            if (modulatesCutoff)
-                voice.setCutoff(cutoff);
-
-            mix += voice.nextSample(position);
+            if (voice.isActive())
+                mix += voice.nextSample(mod);
         }
 
         output[i] = mix * gain;
     }
+
+    publishDisplayState();
+}
+
+void WavetableEngine::publishDisplayState()
+{
+    // Drawn from the most recently started voice. With a per-voice modulation
+    // envelope there is no single answer for the instrument as a whole, and the
+    // note just played is the one an eye follows.
+    int newest = -1;
+    for (int i = 0; i < kMaxVoices; ++i)
+    {
+        if (voices_[i].isActive()
+            && (newest < 0 || voiceStartOrder_[i] > voiceStartOrder_[newest]))
+        {
+            newest = i;
+        }
+    }
+
+    if (newest < 0)
+        return;
+
+    displayPosition_ = voices_[newest].lastPosition();
+    displayCutoff_ = voices_[newest].lastCutoff();
 }
 
 } // namespace stankface
