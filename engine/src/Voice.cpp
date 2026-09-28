@@ -17,6 +17,7 @@ void Voice::setSampleRate(double sampleRate)
     osc_.setSampleRate(sampleRate);
     filter_.setSampleRate(sampleRate);
     ampEnv_.setSampleRate(sampleRate);
+    modEnv_.setSampleRate(sampleRate);
 }
 
 void Voice::reset()
@@ -24,6 +25,7 @@ void Voice::reset()
     osc_.reset();
     filter_.reset();
     ampEnv_.reset();
+    modEnv_.reset();
     note_ = -1;
 }
 
@@ -36,6 +38,11 @@ void Voice::setAmpAttack(float seconds)  { ampEnv_.setAttack(seconds); }
 void Voice::setAmpDecay(float seconds)   { ampEnv_.setDecay(seconds); }
 void Voice::setAmpSustain(float level)   { ampEnv_.setSustain(level); }
 void Voice::setAmpRelease(float seconds) { ampEnv_.setRelease(seconds); }
+
+void Voice::setEnvAttack(float seconds)  { modEnv_.setAttack(seconds); }
+void Voice::setEnvDecay(float seconds)   { modEnv_.setDecay(seconds); }
+void Voice::setEnvSustain(float level)   { modEnv_.setSustain(level); }
+void Voice::setEnvRelease(float seconds) { modEnv_.setRelease(seconds); }
 
 void Voice::retune(int midiNote)
 {
@@ -60,19 +67,40 @@ void Voice::noteOn(int midiNote, float velocity, bool restartPhase)
     }
 
     ampEnv_.noteOn();
+    modEnv_.noteOn();
 }
 
 void Voice::noteOff()
 {
     ampEnv_.noteOff();
+    modEnv_.noteOff();
 }
 
-float Voice::nextSample(float position)
+float Voice::nextSample(const Modulation& mod)
 {
     if (!ampEnv_.isActive())
         return 0.0f;
 
+    const float env = modEnv_.nextSample();
+
+    float position = mod.basePosition
+                   + mod.lfo * mod.lfoToPosition
+                   + env * mod.envToPosition;
+    position = position < 0.0f ? 0.0f : (position > 1.0f ? 1.0f : position);
+
+    // Both sources add in octaves before being applied, so a given depth moves
+    // the cutoff by the same musical interval wherever the knob is set, and the
+    // two routes combine the way a player would expect rather than one scaling
+    // the other. The filter clamps the result to something it can run at.
+    const float octaves = (mod.lfo * mod.lfoToCutoff + env * mod.envToCutoff)
+                        * kCutoffModOctaves;
+    const float cutoff = mod.baseCutoff * std::exp2(octaves);
+
+    lastPosition_ = position;
+    lastCutoff_ = cutoff;
+
     osc_.setPosition(position);
+    filter_.setCutoff(cutoff);
 
     // Oscillator into filter into amplifier, in that order. Putting the
     // envelope after the filter rather than before it matters here because the

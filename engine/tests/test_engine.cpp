@@ -6,6 +6,7 @@
 #include "stankface/WavetableEngine.h"
 
 #include <cmath>
+#include <cstring>
 #include <vector>
 
 using namespace stankface;
@@ -258,6 +259,8 @@ TEST(engineStaysBoundedWithEverythingModulating)
         engine.setParam(ParamId::LfoRate, 18.0f);
         engine.setParam(ParamId::LfoToPosition, 1.0f);
         engine.setParam(ParamId::LfoToCutoff, 1.0f);
+        engine.setParam(ParamId::EnvToPosition, 1.0f);
+        engine.setParam(ParamId::EnvToCutoff, 1.0f);
         engine.setParam(ParamId::OutputGain, 1.0f);
 
         for (int note : { 24, 36, 48, 72, 96 })
@@ -535,4 +538,217 @@ TEST(repeatedParameterPushesDoNotDisturbHeldNotes)
 
     CHECK(engine.isActive());
     CHECK_NEAR(after, before, before * 0.05);
+}
+
+
+// ---------------------------------------------------------------------------
+// Modulation envelope
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/** Ratio of high-frequency to low-frequency energy. Stands in for brightness,
+    which is what a cutoff or position sweep audibly changes. */
+double brightnessOf(const std::vector<float>& block)
+{
+    const std::vector<double> spectrum = test::magnitudeSpectrum(block);
+
+    double low = 0.0;
+    double high = 0.0;
+    for (std::size_t bin = 1; bin < spectrum.size(); ++bin)
+        (bin < 64 ? low : high) += spectrum[bin] * spectrum[bin];
+
+    return high / (low + 1.0e-12);
+}
+
+/** An engine with a slow modulation envelope and no LFO, so that anything the
+    curve does is the envelope's doing alone. */
+WavetableEngine makeModEnvEngine()
+{
+    WavetableEngine engine = makeEngine(VoiceMode::Poly);
+    engine.setParam(ParamId::AmpAttack, 0.0f);
+    engine.setParam(ParamId::AmpSustain, 1.0f);
+    engine.setParam(ParamId::AmpRelease, 0.001f);
+    engine.setParam(ParamId::WavetablePosition, 0.0f);
+    engine.setParam(ParamId::FilterCutoff, 300.0f);
+    engine.setParam(ParamId::FilterResonance, 0.0f);
+    engine.setParam(ParamId::Drive, 0.0f);
+    engine.setParam(ParamId::LfoToPosition, 0.0f);
+    engine.setParam(ParamId::LfoToCutoff, 0.0f);
+
+    engine.setParam(ParamId::EnvAttack, 0.25f);
+    engine.setParam(ParamId::EnvDecay, 0.001f);
+    engine.setParam(ParamId::EnvSustain, 1.0f);
+    engine.setParam(ParamId::EnvRelease, 0.05f);
+    return engine;
+}
+
+} // namespace
+
+TEST(envelopeDepthDefaultsToZero)
+{
+    // Adding the envelope must not change any patch that does not ask for it.
+    WavetableEngine engine;
+    CHECK_NEAR(engine.getParam(ParamId::EnvToPosition), 0.0, 1.0e-9);
+    CHECK_NEAR(engine.getParam(ParamId::EnvToCutoff), 0.0, 1.0e-9);
+}
+
+TEST(envelopeToCutoffOpensTheFilter)
+{
+    WavetableEngine engine = makeModEnvEngine();
+    engine.setParam(ParamId::WavetablePosition, 1.0f); // harmonics to filter
+    engine.setParam(ParamId::EnvToCutoff, 1.0f);
+
+    engine.noteOn(36, 1.0f);
+
+    // Start of the attack: the envelope is near zero, so the filter is still
+    // down at its unmodulated cutoff.
+    const double atStart = brightnessOf(render(engine, 4096));
+
+    // Let the attack finish, then measure again.
+    render(engine, static_cast<int>(0.3 * kSampleRate));
+    const double atPeak = brightnessOf(render(engine, 4096));
+
+    CHECK_MESSAGE(atPeak > atStart * 4.0,
+                  "envelope did not open the filter: brightness went from "
+                      + std::to_string(atStart) + " to " + std::to_string(atPeak));
+}
+
+TEST(envelopeToCutoffCanCloseTheFilter)
+{
+    // Negative depth has to sweep downwards, not just be a magnitude.
+    WavetableEngine engine = makeModEnvEngine();
+    engine.setParam(ParamId::WavetablePosition, 1.0f);
+    engine.setParam(ParamId::FilterCutoff, 4000.0f);
+    engine.setParam(ParamId::EnvToCutoff, -1.0f);
+
+    engine.noteOn(36, 1.0f);
+    const double atStart = brightnessOf(render(engine, 4096));
+
+    render(engine, static_cast<int>(0.3 * kSampleRate));
+    const double atPeak = brightnessOf(render(engine, 4096));
+
+    CHECK_MESSAGE(atPeak < atStart * 0.5,
+                  "negative depth did not close the filter: brightness went from "
+                      + std::to_string(atStart) + " to " + std::to_string(atPeak));
+}
+
+TEST(envelopeToPositionMovesTheMorph)
+{
+    WavetableEngine engine = makeModEnvEngine();
+    engine.setParam(ParamId::FilterCutoff, 20000.0f);
+    engine.setParam(ParamId::WavetablePosition, 0.0f);
+    engine.setParam(ParamId::EnvToPosition, 1.0f);
+
+    engine.noteOn(36, 1.0f);
+    const double atStart = brightnessOf(render(engine, 4096));
+
+    render(engine, static_cast<int>(0.3 * kSampleRate));
+    const double atPeak = brightnessOf(render(engine, 4096));
+
+    CHECK_MESSAGE(atPeak > atStart * 4.0,
+                  "envelope did not drive position: brightness went from "
+                      + std::to_string(atStart) + " to " + std::to_string(atPeak));
+}
+
+TEST(modEnvelopeIsPerVoice)
+{
+    // The point of the whole restructure. Both measurements sound the same two
+    // pitches, so pitch cannot account for the difference -- only where each
+    // note is in its own sweep can. A single shared envelope would make the two
+    // cases identical, because the second note would inherit a sweep that had
+    // already finished.
+    auto brightnessWith = [](bool startTogether) {
+        WavetableEngine engine = makeModEnvEngine();
+        engine.setParam(ParamId::WavetablePosition, 1.0f);
+        engine.setParam(ParamId::EnvAttack, 1.0f);
+        engine.setParam(ParamId::EnvToCutoff, 1.0f);
+
+        if (startTogether)
+        {
+            // Both sweeps run to completion before measuring.
+            engine.noteOn(36, 1.0f);
+            engine.noteOn(48, 1.0f);
+            render(engine, static_cast<int>(1.2 * kSampleRate));
+        }
+        else
+        {
+            // The first note's sweep completes, then the second starts from
+            // scratch and is measured at the very beginning of its own.
+            engine.noteOn(36, 1.0f);
+            render(engine, static_cast<int>(1.2 * kSampleRate));
+            engine.noteOn(48, 1.0f);
+        }
+
+        return brightnessOf(render(engine, 4096));
+    };
+
+    const double bothSwept = brightnessWith(true);
+    const double secondJustStarted = brightnessWith(false);
+
+    CHECK_MESSAGE(secondJustStarted < bothSwept * 0.75,
+                  "the second note did not start its own envelope: brightness "
+                      + std::to_string(bothSwept) + " when both had swept, "
+                      + std::to_string(secondJustStarted) + " when one had just begun");
+}
+
+TEST(modEnvelopeDoesNotKeepTheVoiceAlive)
+{
+    // ampEnv_ decides when a voice is finished. A long envelope release must not
+    // hold a voice open after the amplifier has closed.
+    WavetableEngine engine = makeModEnvEngine();
+    engine.setParam(ParamId::AmpRelease, 0.01f);
+    engine.setParam(ParamId::EnvRelease, 10.0f);
+    engine.setParam(ParamId::EnvToCutoff, 1.0f);
+
+    engine.noteOn(36, 1.0f);
+    render(engine, 4096);
+    engine.noteOff(36);
+
+    render(engine, static_cast<int>(0.2 * kSampleRate));
+
+    CHECK_MESSAGE(!engine.isActive(),
+                  "a long envelope release kept the voice sounding");
+}
+
+TEST(everyParameterHasAGroupThatIsLaidOut)
+{
+    // The editor builds its sections from kParamGroupOrder and files each
+    // control under its descriptor's group. A group named in one place and not
+    // the other would silently drop controls off the panel, which nothing else
+    // here would catch.
+    for (int i = 0; i < kNumParams; ++i)
+    {
+        const ParamDescriptor& d = paramDescriptor(static_cast<ParamId>(i));
+
+        CHECK_MESSAGE(d.group != nullptr && d.group[0] != '\0',
+                      std::string("parameter ") + d.id + " has no group");
+        if (d.group == nullptr)
+            continue;
+
+        bool laidOut = false;
+        for (int g = 0; g < kNumParamGroups; ++g)
+            if (std::strcmp(d.group, kParamGroupOrder[g]) == 0)
+                laidOut = true;
+
+        CHECK_MESSAGE(laidOut, std::string("parameter ") + d.id + " is in group \""
+                                  + d.group + "\", which the panel never lays out");
+    }
+}
+
+TEST(everyLaidOutGroupIsUsed)
+{
+    // The other direction: a section with nothing in it would draw an empty
+    // heading.
+    for (int g = 0; g < kNumParamGroups; ++g)
+    {
+        bool used = false;
+        for (int i = 0; i < kNumParams; ++i)
+            if (std::strcmp(paramDescriptor(static_cast<ParamId>(i)).group,
+                            kParamGroupOrder[g]) == 0)
+                used = true;
+
+        CHECK_MESSAGE(used, std::string("group \"") + kParamGroupOrder[g]
+                                + "\" has no parameters in it");
+    }
 }
