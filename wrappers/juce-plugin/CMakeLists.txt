@@ -9,7 +9,7 @@ FetchContent_Declare(JUCE
 )
 FetchContent_MakeAvailable(JUCE)
 
-juce_add_plugin(StankfacePlugin
+juce_add_plugin(Stankface
     PRODUCT_NAME "Stankface"
     COMPANY_NAME "Stankface"
     BUNDLE_ID "com.stankface.synth"
@@ -24,25 +24,25 @@ juce_add_plugin(StankfacePlugin
     COPY_PLUGIN_AFTER_BUILD ${STANKFACE_INSTALL_PLUGIN}
 )
 
-target_sources(StankfacePlugin PRIVATE
+target_sources(Stankface PRIVATE
     PluginProcessor.cpp
     ${CMAKE_SOURCE_DIR}/ui/PluginEditor.cpp
 )
 
 # The editor includes PluginProcessor.h and vice versa; both directories are on
 # the path so neither has to know where the other sits.
-target_include_directories(StankfacePlugin PRIVATE
+target_include_directories(Stankface PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/ui
 )
 
-target_compile_definitions(StankfacePlugin PUBLIC
+target_compile_definitions(Stankface PUBLIC
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0
 )
 
-target_link_libraries(StankfacePlugin
+target_link_libraries(Stankface
     PRIVATE
         stankface_engine
         juce::juce_audio_utils
