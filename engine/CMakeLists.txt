@@ -7,6 +7,7 @@ add_library(stankface_engine STATIC
     src/Params.cpp
     src/Voice.cpp
     src/WavetableEngine.cpp
+    src/Presets.cpp
 )
 
 target_include_directories(stankface_engine PUBLIC include)

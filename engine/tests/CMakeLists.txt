@@ -4,6 +4,7 @@ add_executable(engine_tests
     test_envelope.cpp
     test_filter.cpp
     test_engine.cpp
+    test_presets.cpp
 )
 
 target_link_libraries(engine_tests PRIVATE stankface_engine)

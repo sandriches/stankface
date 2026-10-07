@@ -28,7 +28,12 @@ float parseParamValue(stankface::ParamId id, const juce::String& text);
     the DSP. The engine is linked as a plain static library and driven through
     its five public methods, which is what keeps it usable from anything else.
 */
-class StankfaceAudioProcessor : public juce::AudioProcessor
+class StankfaceAudioProcessor : public juce::AudioProcessor,
+                                // Broadcasts whenever the current program
+                                // changes, from whichever side asked for it,
+                                // so the editor's selector follows a preset
+                                // picked from the host.
+                                public juce::ChangeBroadcaster
 {
 public:
     StankfaceAudioProcessor();
@@ -49,10 +54,13 @@ public:
     bool isMidiEffect() const override { return false; }
     double getTailLengthSeconds() const override;
 
-    int getNumPrograms() override { return 1; }
-    int getCurrentProgram() override { return 0; }
-    void setCurrentProgram(int) override {}
-    const juce::String getProgramName(int) override { return {}; }
+    /** The factory presets, as the host's program list. Exposing them here
+        rather than only in the editor means a host's own preset menu, and a
+        program change from a controller, reach the same set. */
+    int getNumPrograms() override;
+    int getCurrentProgram() override;
+    void setCurrentProgram(int index) override;
+    const juce::String getProgramName(int index) override;
     void changeProgramName(int, const juce::String&) override {}
 
     void getStateInformation(juce::MemoryBlock& destData) override;
@@ -92,6 +100,11 @@ private:
     stankface::WavetableEngine engine_;
 
     juce::MidiKeyboardState keyboardState_;
+
+    /** Which factory preset was loaded last. Only a label: turning a knob
+        afterwards does not change it, the same as a hardware synth's program
+        number. Saved with the session so the selector reopens on it. */
+    std::atomic<int> currentProgram_ { 0 };
 
     // Written on the audio thread, read by the editor. Relaxed ordering is
     // enough: these two are independent readings for drawing, not a pair that

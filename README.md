@@ -47,6 +47,11 @@ plug-in folders.
 - Sixteen voices, or mono with last-note priority and legato retuning. Mono is
   a separate mode rather than a pool of one, and it's the default. A full
   sixteen-voice chord with everything modulating costs about 2% of a core.
+- Six factory presets plus Init, picked from the title bar or the host's own
+  program list: `Sub Pressure`, `Reese Wobble`, `Growl Talker`, `Garage Stab`,
+  `Neuro Snarl` and `Drift Pad`. They live in the engine
+  ([engine/src/Presets.cpp](engine/src/Presets.cpp)), and the tests check
+  every one stays in range, sounds and stays under full scale.
 
 ## Engine API
 

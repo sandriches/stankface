@@ -18,7 +18,8 @@
     control here with no edit to this file. Stock JUCE widgets otherwise; the XY
     morph pad comes later.
 */
-class StankfaceAudioProcessorEditor : public juce::AudioProcessorEditor
+class StankfaceAudioProcessorEditor : public juce::AudioProcessorEditor,
+                                      private juce::ChangeListener
 {
 public:
     explicit StankfaceAudioProcessorEditor(StankfaceAudioProcessor& owner);
@@ -68,7 +69,20 @@ private:
     std::vector<std::unique_ptr<Group>> groups_;
     juce::Label title_;
 
+    /** Factory preset selector: a list plus previous/next, so auditioning the
+        set is one click per sound rather than open, pick, close. */
+    juce::ComboBox presetBox_;
+    juce::TextButton previousPreset_ { "<" };
+    juce::TextButton nextPreset_ { ">" };
+
     Group& groupFor(const juce::String& name);
+
+    /** Steps through the presets, wrapping at either end. */
+    void stepPreset(int delta);
+
+    /** Follows the processor when the program changes from anywhere,
+        including the host's own preset menu. */
+    void changeListenerCallback(juce::ChangeBroadcaster*) override;
 
     /** Places everything inside content_, once, at the logical size. */
     void layoutContent();

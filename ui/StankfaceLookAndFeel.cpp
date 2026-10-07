@@ -24,6 +24,11 @@ StankfaceLookAndFeel::StankfaceLookAndFeel()
               colours::accent.withAlpha(0.20f));
     setColour(juce::PopupMenu::highlightedTextColourId, colours::text);
 
+    setColour(juce::TextButton::buttonColourId, colours::panel);
+    setColour(juce::TextButton::buttonOnColourId, colours::accent.withAlpha(0.20f));
+    setColour(juce::TextButton::textColourOffId, colours::accent);
+    setColour(juce::TextButton::textColourOnId, colours::accent);
+
     setColour(juce::TextEditor::backgroundColourId, colours::panel);
     setColour(juce::TextEditor::textColourId, colours::text);
     setColour(juce::TextEditor::highlightColourId, colours::accent.withAlpha(0.25f));

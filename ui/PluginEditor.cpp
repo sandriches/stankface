@@ -1,6 +1,7 @@
 #include "PluginEditor.h"
 
 #include "stankface/Params.h"
+#include "stankface/Presets.h"
 
 using namespace stankface;
 
@@ -15,7 +16,10 @@ constexpr int kHeadingHeight = 18;
 constexpr int kGroupGap = 6;
 constexpr int kMargin = 12;
 constexpr int kTitleHeight = 28;
-constexpr int kDisplayHeight = 150;
+constexpr int kPresetBoxWidth = 180;
+constexpr int kPresetButtonWidth = 24;
+constexpr int kPresetControlHeight = 22;
+constexpr int kDisplayHeight = 210;
 constexpr int kDisplayGap = 10;
 
 // One octave, C2 up to C3 inclusive, which is the register this instrument is
@@ -86,6 +90,25 @@ StankfaceAudioProcessorEditor::StankfaceAudioProcessorEditor(
     content_.addAndMakeVisible(title_);
 
     content_.addAndMakeVisible(display_);
+
+    for (int i = 0; i < kNumPresets; ++i)
+        presetBox_.addItem(presetName(i), i + 1);
+
+    presetBox_.setSelectedId(processor_.getCurrentProgram() + 1,
+                             juce::dontSendNotification);
+    presetBox_.onChange = [this] {
+        const int index = presetBox_.getSelectedId() - 1;
+        if (index >= 0 && index != processor_.getCurrentProgram())
+            processor_.setCurrentProgram(index);
+    };
+    content_.addAndMakeVisible(presetBox_);
+
+    previousPreset_.onClick = [this] { stepPreset(-1); };
+    nextPreset_.onClick = [this] { stepPreset(1); };
+    content_.addAndMakeVisible(previousPreset_);
+    content_.addAndMakeVisible(nextPreset_);
+
+    processor_.addChangeListener(this);
 
     // Sections first, in the declared order, so that the panel reads in signal
     // order rather than in the order parameters happened to be added.
@@ -222,8 +245,24 @@ StankfaceAudioProcessorEditor::groupFor(const juce::String& name)
     return *groups_.back();
 }
 
+void StankfaceAudioProcessorEditor::stepPreset(int delta)
+{
+    const int count = processor_.getNumPrograms();
+    const int index = ((processor_.getCurrentProgram() + delta) % count + count) % count;
+
+    processor_.setCurrentProgram(index);
+}
+
+void StankfaceAudioProcessorEditor::changeListenerCallback(juce::ChangeBroadcaster*)
+{
+    presetBox_.setSelectedId(processor_.getCurrentProgram() + 1,
+                             juce::dontSendNotification);
+}
+
 StankfaceAudioProcessorEditor::~StankfaceAudioProcessorEditor()
 {
+    processor_.removeChangeListener(this);
+
     // Detach before the look and feel goes out of scope; JUCE asserts on a
     // component still pointing at a destroyed one.
     setLookAndFeel(nullptr);
@@ -237,7 +276,21 @@ void StankfaceAudioProcessorEditor::paint(juce::Graphics& g)
 void StankfaceAudioProcessorEditor::layoutContent()
 {
     juce::Rectangle<int> area = content_.getLocalBounds().reduced(kMargin);
-    title_.setBounds(area.removeFromTop(kTitleHeight));
+    juce::Rectangle<int> titleRow = area.removeFromTop(kTitleHeight);
+
+    // Presets on the right of the title row: previous, list, next.
+    const int presetY = titleRow.getCentreY() - kPresetControlHeight / 2;
+    juce::Rectangle<int> presets = titleRow.removeFromRight(
+        kPresetBoxWidth + 2 * (kPresetButtonWidth + 4));
+    presets = presets.withY(presetY).withHeight(kPresetControlHeight);
+
+    nextPreset_.setBounds(presets.removeFromRight(kPresetButtonWidth));
+    presets.removeFromRight(4);
+    previousPreset_.setBounds(presets.removeFromLeft(kPresetButtonWidth));
+    presets.removeFromLeft(4);
+    presetBox_.setBounds(presets);
+
+    title_.setBounds(titleRow);
 
     display_.setBounds(area.removeFromTop(kDisplayHeight));
     area.removeFromTop(kDisplayGap);

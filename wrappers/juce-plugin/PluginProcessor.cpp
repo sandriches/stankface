@@ -1,11 +1,15 @@
 #include "PluginProcessor.h"
 
 #include "PluginEditor.h"
+#include "stankface/Presets.h"
 #include "stankface/WavetableData.h"
 
 using namespace stankface;
 
 namespace {
+
+/** State property holding the current program, alongside the parameters. */
+const juce::Identifier kProgramProperty { "program" };
 
 /** Parameters the host should show as a list rather than a continuous control. */
 juce::StringArray choicesFor(ParamId id)
@@ -230,17 +234,75 @@ juce::AudioProcessorEditor* StankfaceAudioProcessor::createEditor()
     return new StankfaceAudioProcessorEditor(*this);
 }
 
+int StankfaceAudioProcessor::getNumPrograms()
+{
+    return kNumPresets;
+}
+
+int StankfaceAudioProcessor::getCurrentProgram()
+{
+    return currentProgram_.load();
+}
+
+const juce::String StankfaceAudioProcessor::getProgramName(int index)
+{
+    return presetName(index);
+}
+
+void StankfaceAudioProcessor::setCurrentProgram(int index)
+{
+    if (index < 0 || index >= kNumPresets)
+        return;
+
+    currentProgram_.store(index);
+
+    // Every parameter, not just the ones the preset names: anything left alone
+    // would carry over from the previous sound. Each change is wrapped as a
+    // gesture so a host recording automation sees one clean edit per
+    // parameter instead of an unexplained jump.
+    for (int i = 0; i < kNumParams; ++i)
+    {
+        const ParamId id = static_cast<ParamId>(i);
+
+        if (juce::RangedAudioParameter* parameter =
+                parameters_.getParameter(paramDescriptor(id).id))
+        {
+            parameter->beginChangeGesture();
+            parameter->setValueNotifyingHost(
+                parameter->convertTo0to1(presetValue(index, id)));
+            parameter->endChangeGesture();
+        }
+    }
+
+    sendChangeMessage();
+}
+
 void StankfaceAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
-    if (auto xml = parameters_.copyState().createXml())
+    juce::ValueTree state = parameters_.copyState();
+    state.setProperty(kProgramProperty, currentProgram_.load(), nullptr);
+
+    if (auto xml = state.createXml())
         copyXmlToBinary(*xml, destData);
 }
 
 void StankfaceAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
 {
     if (auto xml = getXmlFromBinary(data, sizeInBytes))
+    {
         if (xml->hasTagName(parameters_.state.getType()))
-            parameters_.replaceState(juce::ValueTree::fromXml(*xml));
+        {
+            const juce::ValueTree state = juce::ValueTree::fromXml(*xml);
+
+            // Sessions saved before presets existed have no property, and
+            // read as Init, which is what they were built on.
+            currentProgram_.store(juce::jlimit(
+                0, kNumPresets - 1, static_cast<int>(state.getProperty(kProgramProperty, 0))));
+
+            parameters_.replaceState(state);
+            sendChangeMessage();
+        }
+    }
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
